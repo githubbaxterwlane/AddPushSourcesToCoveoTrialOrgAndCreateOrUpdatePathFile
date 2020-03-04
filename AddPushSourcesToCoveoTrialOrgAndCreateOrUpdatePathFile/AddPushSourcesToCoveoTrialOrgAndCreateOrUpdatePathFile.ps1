@@ -1,6 +1,7 @@
 ﻿function CreateOrGetPushSources {
 
     [CmdLetBinding()]
+    [OutputType([CoveoOrganizationPushSources])]
 	param (
 
 		[string]
@@ -16,6 +17,7 @@
     function Invoke-Main {
 
         [CmdletBinding()]
+        [OutputType([CoveoOrganizationPushSources])]
         param (
 
             [Parameter(Mandatory)]
@@ -23,7 +25,8 @@
             $authToken
         )
 
-        $pushSourcesToReturn = @();
+        $orgPushSources = [CoveoOrganizationPushSources]::new();
+        $orgPushSources.Organization = Get-Organization -authToken $authToken;
 
         $currentPushSources = Get-PushSource -authToken $authToken;
 
@@ -47,7 +50,7 @@
 
                     Write-Verbose "$($MyInvocation.MyCommand.Name): No need to create this push source, it exists already: $curPushSourceName";
 
-                    $pushSourcesToReturn += $curExistingSource;
+                    $orgPushSources.PushSources += $curExistingSource;
 
                     break;
                 }
@@ -59,12 +62,12 @@
 
                 Write-Verbose "$($MyInvocation.MyCommand.Name): New Push Source Has been Created $curPushSourceName";
 
-                $pushSourcesToReturn += $pushSourceCreationResponse;
+                $orgPushSources.PushSources += $pushSourceCreationResponse;
             }
 
         }
 
-        return $pushSourcesToReturn;
+        return $orgPushSources;
     }
     
     function Get-PushSource {
@@ -99,6 +102,7 @@
     function Get-Source {
 
         [CmdletBinding()]
+        [OutputType([CoveoSource[]])]
         param (
         
             [Parameter(Mandatory)]
@@ -110,14 +114,32 @@
 
         $sources = Invoke-RestMethod -Method Get -Headers (Get-BearerTokenAuthorizationHeaderKeyValuePair -authToken $authToken) -ContentType $localSettings.appJson -Uri $restEndpoint
 
-        Write-Verbose "$($MyInvocation.MyCommand.Name): $($sources.Count) sources found.";
+        if ($sources){
 
-        return $sources
+            Write-Verbose "$($MyInvocation.MyCommand.Name): $($sources.Count) sources found.";
+
+            [CoveoSource[]]$returnSources = @();
+
+            foreach($curSource in $sources) {
+
+                [CoveoSource]$curReturnSource = Get-CoveoSourceFromResponse -response $curSource;
+
+                $returnSources += $curReturnSource;
+            }
+
+            return $returnSources;
+        } else {
+
+            Write-Verbose "$($MyInvocation.MyCommand.Name): No sources were found."
+
+            return [CoveoSource[]] @();
+        }
     }
 
     function Get-Organization {
 
         [CmdletBinding()]
+        [OutputType([CoveoOrganization])]
         param (
         
             [Parameter(Mandatory)]
@@ -129,14 +151,30 @@
 
         $organization = Invoke-RestMethod -Method Get -Headers (Get-BearerTokenAuthorizationHeaderKeyValuePair -authToken $authToken) -ContentType $localSettings.appJson -Uri $restEndpoint
 
-        Write-Verbose "$($MyInvocation.MyCommand.Name): Got org $($organization.Name)"
+        if ($organization) {
 
-        return $organization;
+            Write-Verbose "$($MyInvocation.MyCommand.Name): Got org $($organization.displayName)"
+
+            [CoveoOrganization]$coveoOrg = [CoveoOrganization]::new();
+
+            $coveoOrg.DisplayName = $organization.displayName;
+            $coveoOrg.Id = $organization.id;
+            $coveoOrg.OwnerEmail = $organization.owner.email;
+            $coveoOrg.PublicContentOnly = $organization.publicContentOnly;
+            $coveoOrg.ReadOnly = $organization.readonly;
+            $coveoOrg.Type = $organization.type;
+
+            return $coveoOrg;
+
+        } else {
+            Throw "No organization could be found for the token '$authToken'!"
+        }
     }
 
     function New-PushSource {
 
         [CmdletBinding()]
+        [OutputType([CoveoSource])]
         param (
 
             [Parameter(Mandatory)]
@@ -169,9 +207,38 @@
 
         $response = Invoke-RestMethod -Method Post -Headers (Get-BearerTokenAuthorizationHeaderKeyValuePair -authToken $authToken) -Body $requestBodyJson -ContentType $localSettings.appJson -Uri $restEndpoint
 
-        Write-Verbose "$($MyInvocation.MyCommand.Name): Created new push source $name";
+        [CoveoSource]$coveoSource = Get-CoveoSourceFromResponse -response $response;
 
-        return $response
+        Write-Verbose "$($MyInvocation.MyCommand.Name): Created new push source $($coveoSource.Name).";
+
+        return $coveoSource;
+    }
+
+    function Get-CoveoSourceFromResponse {
+
+        [OutputType([CoveoSource])]
+        param(
+
+            $response
+        )
+
+        if ($response) {
+
+            [CoveoSource]$returnSource = [CoveoSource]::new();
+
+            $returnSource.Id = $response.id;
+            $returnSource.Name = $response.name;
+            $returnSource.OnPremisesEnabled = $response.onPremisesEnabled;
+            $returnSource.PushEnabled = $response.pushEnabled;
+            $returnSource.ResourceId = $response.resourceId;
+            $returnSource.SourceType = $response.sourceType;
+            $returnSource.SourceVisibility = $response.sourceVisiblity;
+
+            return $returnSource;
+        } else {
+
+            return $null;
+        }
     }
 
     function Get-PushSourceNames {
@@ -324,137 +391,331 @@ function PatchSitecoreToUsePushSources {
     [CmdletBinding()]
     param (
 
-        $pushSources
+        [Parameter(Mandatory=$true)]
+        [ValidateNotNull()]
+        [CoveoOrganizationPushSources]
+        $organizationPushSources,
+
+        [Parameter(Mandatory)]
+        [ValidateNotNull()]
+        [string]
+        $authToken,
+
+        [ValidateNotNull()]
+        [string]
+        $daltileSiteName = "daltile.sc"
     )
 
     function Invoke-Main {
 
-        Update-PushSourceConfigFile;
+        [CmdletBinding()]
+        param (
 
+            [Parameter(Mandatory=$true)]
+            [ValidateNotNull()]
+            [CoveoOrganizationPushSources]
+            $organizationPushSources,
+
+            [Parameter(Mandatory)]
+            [ValidateNotNull()]
+            [string]
+            $authToken,
+
+            [Parameter(Mandatory=$true)]
+            [ValidateNotNull()]
+            [string]
+            $daltileSiteName
+        )
+
+        Update-PushSourceConfigFile -organizationPushSources $organizationPushSources -authToken $authToken;
     }
 
     function Update-PushSourceConfigFile {
-
     
+        [CmdletBinding()]
         param (
-            [ValidateNotNullOrEmpty()]        
-            [string]
-            $path = "\\blane-pk\C$\inetpub\wwwroot\daltile.sc\App_Config\Include\Feature\zzz.Feature.SiteSearch-sources override to baxters gmail account as a trial.config",
+
+            [Parameter(Mandatory=$true)]
+            [ValidateNotNull()]
+            [CoveoOrganizationPushSources]
+            $organizationPushSources,
 
             [Parameter(Mandatory)]
+            [ValidateNotNull()]
             [string]
-            $authToken
+            $authToken,
+
+            [Parameter(Mandatory=$true)]
+            [ValidateNotNull()]
+            [string]
+            $daltileSiteName
+        )
+               
+        [xml]$configXml = Get-XmlDocument;
+
+        [System.Xml.XmlElement]$settingsElement = $configXml.SelectSingleNode("configuration/sitecore/settings");
+
+        for ($i = 0; $i -lt $organizationPushSources.PushSources.Count; $i++) { 
+    
+            [CoveoSource]$curPushSource = $organizationPushSources.PushSources[$i];
+
+            $comment = $configXml.CreateComment($curPushSource.Name);
+            $settingsElement.AppendChild($comment);
+
+            [string]$settingsNamePrefix = Get-SettingNamePrefix -coveoSource $curPushSource;
+            [string]$databaseName = Get-DatabaseNameForSource -coveoSource $curPushSource;
+
+            Add-SettingElement -settingNamePrefix $settingsNamePrefix -settingName "SourceName" -settingValue $curPushSource.Name -settingsElement $settingsElement;
+            Add-SettingElement -settingNamePrefix $settingsNamePrefix -settingName "ForDatabaseName" -settingValue $databaseName -settingsElement $settingsElement;
+            Add-SettingElement -settingNamePrefix $settingsNamePrefix -settingName "BaseAddressRoot" -settingValue "https://push.cloud.coveo.com/v1/" -settingsElement $settingsElement;
+            Add-SettingElement -settingNamePrefix $settingsNamePrefix -settingName "Organization" -settingValue "organizations/$($organizationPushSources.Organization.Id)" -settingsElement $settingsElement;
+            Add-SettingElement -settingNamePrefix $settingsNamePrefix -settingName "Source" -settingValue "sources/$($curPushSource.Id)" -settingsElement $settingsElement;
+            Add-SettingElement -settingNamePrefix $settingsNamePrefix -settingName "AuthenticationHeaderValue" -settingValue $authToken -settingsElement $settingsElement;
+            
+        }
+
+        Save-XmlDocAsPatchFile -docToSave $configXml -daltileSiteName $daltileSiteName;
+
+    }
+    
+    function Get-XmlDocument {
+
+        [string]$docString = @"
+<?xml version="1.0" encoding="utf-8"?>
+<configuration xmlns:patch="http://www.sitecore.net/xmlconfig/"
+               xmlns:role="http://www.sitecore.net/xmlconfig/role/"
+               xmlns:env="http://www.sitecore.net/xmlconfig/env/"
+               xmlns:integrations="http://www.sitecore.net/xmlconfig/integrations/"
+               xmlns:localenv="$(Get-LocalEnvRequireUrl)">
+
+    <sitecore>
+        <settings>
+        </settings>
+    </sitecore>
+</configuration>
+"@
+
+        [xml]$doc = $docString;
+
+        return $doc;
+    }
+
+    function Get-SettingNamePrefix {
+        
+        [CmdletBinding()]        
+        param(
+
+            [Parameter(Mandatory=$true)]
+            [ValidateNotNullOrEmpty()]
+            [CoveoSource]
+            $coveoSource
         )
 
-        if(-Not (Test-Path -Path $path -PathType Leaf)) {
+        [string]$namespace = "DaltileGroup.Feature.SiteSearch.Repositories";
+        [string]$repoName = $null;
 
-            Throw "$path - NOT FOUND!"
+        if ($coveoSource.Name.StartsWith("Series-Index-CM", [System.StringComparison]::InvariantCultureIgnoreCase)) {
+            $repoName = "SeriesIndexPushSourceRepository";
+        } elseif ($coveoSource.Name.StartsWith("Product-Index-CM", [System.StringComparison]::InvariantCultureIgnoreCase)) {
+            $repoName = "ProductIndexPushSourceRepository";
+        } elseif ($coveoSource.Name.StartsWith("Series-Index-CD", [System.StringComparison]::InvariantCultureIgnoreCase)) {
+            $repoName = "SeriesIndexCdPushSourceRepository";
+        } elseif ($coveoSource.Name.StartsWith("Product-Index-CD", [System.StringComparison]::InvariantCultureIgnoreCase)) {
+            $repoName = "ProductIndexCdPushSourceRepository";
+        } else {
+            $repoName = "CouldNotDetermineRepoFromSourceName";
         }
 
+        [string]$prefix = "$namespace.$repoName."
 
-        [xml]$configXml = Get-Content -Path $path
-
-        $pushSources = Get-bwlPushSource -authToken $authToken
-
-        [string]$prodctCMSourceName = Format-bwlPushSourceName -sourceType Product -forDb CM
-        [string]$seriesCMSourceName = Format-bwlPushSourceName -sourceType Series -forDb CM
-        [string]$productCDSourceName = Format-bwlPushSourceName -sourceType Product -forDb CD
-        [string]$seriesCDSourceName = Format-bwlPushSourceName -sourceType Series -forDb CD
-
-        foreach ($curPushSource in $pushSources) {
-
-            switch ($curPushSource.name) {
-                    
-                $prodctCMSourceName { Set-bwlPushSourceConfigsForSource -pushSourceType Product-CM -configXmlDoc $configXml -pushSourceInfo $curPushSource -authToken $authToken ; break; }
-                $seriesCMSourceName { Set-bwlPushSourceConfigsForSource -pushSourceType Series-CM -configXmlDoc $configXml -pushSourceInfo $curPushSource -authToken $authToken ; break; }
-                $productCDSourceName { Set-bwlPushSourceConfigsForSource -pushSourceType Product-CD -configXmlDoc $configXml -pushSourceInfo $curPushSource -authToken $authToken ; break; }
-                $seriesCDSourceName { Set-bwlPushSourceConfigsForSource -pushSourceType Series-CD -configXmlDoc $configXml -pushSourceInfo $curPushSource -authToken $authToken ; break; }
-            }
-        }
-
-        $configXml.Save($path);
-
+        return $prefix;
     }
 
-    function Set-PushSourceConfigsForSource {
+    function Get-DatabaseNameForSource {
 
-        param (
+        [CmdletBinding()]        
+        param(
 
-            [Parameter(Mandatory)]
-            [ValidateSet("Product-CM", "Series-CM", "Product-CD", "Series-CD")]
-            [string]
-            $pushSourceType,
-
-            [Parameter(Mandatory)]        
-            [xml]
-            $configXmlDoc,
-
-            [Parameter(Mandatory)]                
-            $pushSourceInfo,
-
-            [Parameter(Mandatory)]
-            [string]
-            $authToken
+            [Parameter(Mandatory=$true)]
+            [ValidateNotNullOrEmpty()]
+            [CoveoSource]
+            $coveoSource
         )
 
-        $orgInfo = Get-bwlOrganization -authToken $authToken
+        [string]$dbName = $null;
 
-        [string]$settingNamePrefix = "DaltileGroup.Feature.SiteSearch.Repositories."
-
-        switch ($pushSourceType) {
-
-            "Product-CM" { $settingNamePrefix += "ProductIndexPushSourceRepository."; break; }
-            "Series-CM" { $settingNamePrefix += "SeriesIndexPushSourceRepository."; break; }
-            "Product-CD" { $settingNamePrefix += "ProductIndexCdPushSourceRepository."; break; }
-            "Series-CD" { $settingNamePrefix += "SeriesIndexCdPushSourceRepository."; break; }
+        if ($coveoSource.Name.Contains("-CM-")) {
+            $dbName = "master";
+        } elseif ($coveoSource.Name.Contains("-CD-")) {
+            $dbName = "web";
+        } else {
+            $dbName = "CouldNotFindCMOrCdInTheSourceName";
         }
 
-        Set-SitecoreSettingValueAttribute -propertyNamePrefix $settingNamePrefix -propertyName "SourceName" -newValue $pushSourceInfo.name -configXmlDoc $configXmlDoc
-
-        [string]$orgId = $orgInfo.Id
-        [string]$orgSettingValue = "organizations/$orgId"
-        Set-SitecoreSettingValueAttribute -propertyNamePrefix $settingNamePrefix -propertyName "Organization" -newValue $orgSettingValue -configXmlDoc $configXmlDoc
-
-        [string]$sourceId = $pushSourceInfo.Id
-        [string]$sourceSettingValue = "sources/$sourceId"
-        Set-SitecoreSettingValueAttribute -propertyNamePrefix $settingNamePrefix -propertyName "Source" -newValue $sourceSettingValue -configXmlDoc $configXmlDoc
-
-        Set-SitecoreSettingValueAttribute -propertyNamePrefix $settingNamePrefix -propertyName "AuthenticationHeaderValue" -newValue $authToken -configXmlDoc $configXmlDoc
+        return $dbName;
     }
 
-    function Set-SitecoreSettingValueAttribute {
+    function Add-SettingElement {
 
+        [CmdletBinding()]        
+        param(
 
+            [Parameter(Mandatory=$true)]
+            [ValidateNotNullOrEmpty()]
+            [string]
+            $settingNamePrefix,
+
+            [Parameter(Mandatory=$true)]
+            [ValidateNotNullOrEmpty()]
+            [string]
+            $settingName,
+
+            [Parameter(Mandatory=$true)]
+            [ValidateNotNullOrEmpty()]
+            [string]
+            $settingValue,
+
+            [Parameter(Mandatory=$true)]
+            [ValidateNotNull()]
+            [System.Xml.XmlElement]
+            $settingsElement
+        )
+
+        [string]$setting = "setting";
+        [string]$name = "name";
+        [string]$value = "value";
+        [string]$localenv = 'localenv';
+        [string]$require = "require"
+        [string]$env = "LOCAL"
+
+        [System.Xml.XmlElement]$newSettingElement = $settingsElement.OwnerDocument.CreateElement($setting);
+        
+        [System.Xml.XmlAttribute]$nameAtt = $settingsElement.OwnerDocument.CreateAttribute($name);        
+        $nameAtt.Value = "$settingNamePrefix$settingName";
+        $newSettingElement.Attributes.Append($nameAtt);
+
+        [System.Xml.XmlAttribute]$valueAtt = $settingsElement.OwnerDocument.CreateAttribute($value);        
+        $valueAtt.Value = $settingValue;
+        $newSettingElement.Attributes.Append($valueAtt);
+
+        [System.Xml.XmlAttribute]$localEnvRequireAtt = $settingsElement.OwnerDocument.CreateAttribute($localenv, $require, (Get-LocalEnvRequireUrl));        
+        $localEnvRequireAtt.Value = $env;
+        $newSettingElement.Attributes.Append($localEnvRequireAtt);
+
+        $settingsElement.AppendChild($newSettingElement);
+    }
+
+    function Save-XmlDocAsPatchFile {
+
+        [CmdLetBinding()]
         param (
 
-            [Parameter(Mandatory)]        
+            [Parameter(Mandatory=$true)]
+            [ValidateNotNull()]
+            [System.Xml.XmlDocument]
+            $docToSave,
+
+            [Parameter(Mandatory=$true)]
+            [ValidateNotNull()]
             [string]
-            $propertyNamePrefix,
+            $daltileSiteName
+        )
 
-            [Parameter(Mandatory)]        
-            [string]
-            $propertyName,
-                
-            [Parameter(Mandatory)]        
-            [string]
-            $newValue,
+        [string]$patchFileFullPath = Get-PatchFileFullPath -daltileSiteName $daltileSiteName;
 
-            [Parameter(Mandatory)]        
-            [xml]
-            $configXmlDoc
-        )    
-
-        [string]$settingElementName = "setting"
-        [string]$nameAttributeName = "name"
-        [string]$valueAttrributeName = "value"
-
-        $element = $configXmlDoc.SelectSingleNode("configuration/sitecore/settings/setting[@$nameAttributeName='$propertyNamePrefix$propertyName']")
-
-        $element.SetAttribute($valueAttrributeName, $newValue)
-
+        $docToSave.Save($patchFileFullPath);
     }
 
-    Invoke-Main;
+    function Get-PatchFileFullPath {
+
+        [CmdLetBinding()]
+        [OutputType([string])]
+        param (
+
+            [Parameter(Mandatory=$true)]
+            [ValidateNotNull()]
+            [string]
+            $daltileSiteName
+        )
+
+        [string]$siteRootPath = Get-DaltileSiteRootPath -daltileSiteName $daltileSiteName;
+
+        [string]$featureFolderPath = "App_Config\Include\Feature";
+
+        [string]$patchFileName = "zzzz.51605D0EB2E74959947A35E5747BC61F.LocalDevCoveoPushSourcesPatchFileOf.Feature.SiteSearchModule.config"
+
+        [string]$fullPath = [System.IO.Path]::Combine($siteRootPath, $featureFolderPath, $patchFileName);
+
+        return $fullPath;
+    }
+
+    function Get-DaltileSiteRootPath {
+
+        [CmdLetBinding()]
+        [OutputType([string])]
+        param (
+
+            [Parameter(Mandatory=$true)]
+            [ValidateNotNull()]
+            [string]
+            $daltileSiteName
+        )
+
+        Write-Verbose "$($MyInvocation.MyCommand.Name): IIS Site Name = '$daltileSiteName'"
+
+        [Microsoft.IIs.PowerShell.Framework.ConfigurationElement]$website = Get-website -Name $daltileSiteName;
+
+        return $website.physicalPath;
+    }
+
+    function Get-LocalEnvRequireUrl {
+
+        [string]$url = "http://www.sitecore.net/xmlconfig/localenv/";
+
+        return $url;
+    }   
+
+    Invoke-Main -organizationPushSources $organizationPushSources -authToken $authToken -daltileSiteName $daltileSiteName;
 }
 
-$pushSources = CreateOrGetPushSources -authToken "xxdaa6a1a8-79e6-48cf-a058-4b2308beb41a" -Verbose;
+class CoveoOrganizationPushSources {
+
+    OrganizationPushSources() {
+        
+        $this.Organization = [CoveoOrganization]::new();
+
+        $this.PushSources = [CoveoSource[]] @();
+    }
+
+    [CoveoOrganization]$Organization;
+
+    [CoveoSource[]]$PushSources;
+}
+
+class CoveoOrganization {
+
+    [string]$Id;
+    [string]$DisplayName
+    [string]$OwnerEmail;
+    [bool]$PublicContentOnly;
+    [bool]$ReadOnly;
+    [string]$Type;
+}
+
+class CoveoSource {
+
+    [string]$SourceType;
+    [string]$Id;
+    [string]$Name;
+    [string]$SourceVisibility;
+    [bool]$PushEnabled;
+    [bool]$OnPremisesEnabled;
+    [string]$ResourceId;    
+}
+
+[string]$token = "xxdaa6a1a8-79e6-48cf-a058-4b2308beb41a";
+[string]$daltileSiteName = "daltile.sc";
+
+$orgPushSources = CreateOrGetPushSources -authToken $token -Verbose;
+
+PatchSitecoreToUsePushSources -organizationPushSources $orgPushSources -authToken $token -daltileSiteName $daltileSiteName;
